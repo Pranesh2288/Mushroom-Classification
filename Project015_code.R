@@ -1,96 +1,76 @@
-# Import libraries
-library(openxlsx) 
-library(caret) # For splitting the data
+# Suppress global variable binding warnings for ggplot2
+utils::globalVariables(c(
+  "Var1", "Freq", "pred", "obs", "Resample",
+  "Value", "n", "Class", "habitat", "population",
+  "Category", "Count", "Feature", "Importance"
+))
+
+# Import required libraries
+library(openxlsx)
+library(caret)
 library(dplyr)
+library(tidyr)
 library(data.table)
 library(ggplot2)
 library(corrplot)
 library(igraph)
+library(RWeka)
+library(pROC)
+library(e1071)
+library(rpart)
+library(rpart.plot)
+library(FSelector)
+library(gridExtra)  # For arranging multiple plots
+
+# Create directory for plots if it doesn't exist
+dir.create("images", showWarnings = FALSE)
+
+#----------------------------------------
+# 1. Data Loading and Initial Exploration
+#----------------------------------------
 
 # Load the data
-data <- read.csv("mushrooms.csv")
+data <- read.csv("archive/mushrooms.csv")
 
-# Data Pre-processing
-#-------------------------------------------------------------------------------
-# ------------------ Understanding our data-set --------------------------------
-#-------------------------------------------------------------------------------
+# Display dataset information
+cat("\n=== DATASET DIMENSIONS ===\n")
+cat("Rows:   ", nrow(data), "\n")
+cat("Columns:", ncol(data), "\n")
 
-
-# shows the first 5 rows of our data set
-#---------------------------------------
-head(data, 5)
-
-# Finding the dimension of our data set
-#--------------------------------------
-print("Dimension of the dataset is :")
-print(dim(data))
-
-print(paste("Number of columns : ", ncol(data))) # from here we can conclude that there are in total 23 attributes.
-print(paste("Number of rows : ", nrow(data))) # We have 8124 records
-
-# Finding the structure of our data-set (column names, types, etc.):
-#-----------------------------------------------------------------
+# Display the structure and first few rows
+cat("\n=== DATA STRUCTURE ===\n")
 str(data)
-# From here we can conclude that all our attributes have character data .
+cat("\n=== FIRST 5 ROWS ===\n")
+print(head(data, 5))
 
-#-------------------------------------------------------------------------------
-#------------------------------ DATA CLEANING ----------------------------------
-#-------------------------------------------------------------------------------
-# Looking for null value
-#-----------------------
-# Check if data frame is NULL
-print(paste("Null values in the data-set : ", is.null(data)))
+# Data quality checks
+cat("\n=== DATA QUALITY METRICS ===\n")
+cat("Null values:     ", is.null(data), "\n")
+cat("Missing values:  ", sum(is.na(data)), "\n")
+cat("Duplicate rows:  ", nrow(data[duplicated(data), ]), "\n")
 
-# Since the result is false , we can say that there are no null row-values in the data-set.
-# Check for missing values
-#--------------------------
-print(paste("Missing data : ", sum(is.na(data))))
-
-# Since the count for NA's rows is 0 , we can conclude that our data-set has no row-missing values.
-
-# Hence finally we can conclude here that our data set has no missing or null values.
-
-# Looking for duplicate rows
-#------------------------------
-
-# count number of duplicate rows
-print(paste("Count for duplicate rows : ", nrow(data[duplicated(data), ])))
-
-# Since the outcome is zero we can conclude that there are no duplicate rows in our data-set
-
-# checking for noise in our data-set and missing values for each column :
-#------------------------------------------------------------------------
+# Check unique values in each column
+cat("\n=== UNIQUE VALUES BY COLUMN ===\n")
 for (i in 1:23) {
+  col_name <- names(data)[i]
   unique_values <- unique(data[[i]])
-  print(paste("Unique values in column ", i, " are: "))
+  cat("\nColumn", i, "(", col_name, "):\n")
   print(unique_values)
 }
 
-# Looking at the result we found that there are unknown values in column 12 which is 'stalk-root' column of our data-set
-# Which are identified by ? int the cells.
-# Let us now try to find the count of such values.
-count_question_mark <- sum(data$stalk.root == "?")
-print(count_question_mark)
+#----------------------------------------
+# 2. Data Preprocessing and Visualization
+#----------------------------------------
 
-# We found that the count of ? in stalk-root column is 2480 which is pretty high compared to total number of rows in the data-set.
-# This gives us a hint to investigate what all attributes are actually needed for our need for our model .
-# Because attributes with only one kind of values and attribute with all rows having unique value do not contribute much towards our goal.
-# Hence we try finding the cardiniality of each attribute.
-
-#-------------------------------------------------------------------------------
-#---------------------- Exploring Our Data-set ---------------------------------
-#-------------------------------------------------------------------------------
-
-# Finding number of unique values in each columnes
-#------------------------------------------------
+# Identify low/high cardinality features
 object_columns <- sapply(data, is.character)
-result <- as.list(sapply(data[object_columns], function(x) length(unique(x))))
-print(result)
+cardinality <- as.list(sapply(data[object_columns], function(x) length(unique(x))))
+cat("\n=== FEATURE CARDINALITY ===\n")
+for (col in names(cardinality)) {
+  cat(sprintf("%-25s: %d\n", col, cardinality[[col]]))
+}
 
-# Dropping columns with very low/high cardinality
-#----------------------------------------------------
-dim(data)
-
+# Identify columns to drop based on cardinality
 columns_to_drop <- c(
   "bruises",
   "gill.attachment",
@@ -100,413 +80,401 @@ columns_to_drop <- c(
   "veil.type"
 )
 
-# Function to plot a pie chart for unique values of an attribute
-# Function to plot a pie chart for unique values of an attribute
-plot_pie_chart <- function(attribute_name) {
-  unique_values <- table(data[[attribute_name]])
-  labels <- names(unique_values)
-  
-  pie(unique_values, labels = paste(labels, "(", unique_values, ")", sep = ""), main = paste("Pie Chart for", attribute_name))
-}
-
-# Loop through each attribute in the dataset and plot a pie chart
-for (attribute_name in columns_to_drop) {
-  plot_pie_chart(attribute_name)
-}
-
-dim(data)
-
-# Count for edible vs poisonous mushrooms in our data-set
-A <- c(sum(data$class == "e"), sum(data$class == "p"))
-B <- c("Edible", "Poisonous")
-
-barplot(A,
-        names.arg = B, xlab = "Type of Mushroom",
-        ylab = "Count", main = "Count : Edible vs Poisonous Mushroom", col = "pink"
+# Visualize class distribution
+class_dist <- data.frame(
+  Class = c("Edible", "Poisonous"),
+  Count = c(sum(data$class == "e"), sum(data$class == "p"))
 )
 
-# Frequency of each attribute
-#-----------------------------
+p_class <- ggplot(class_dist, aes(x = Class, y = Count, fill = Class)) +
+  geom_bar(stat = "identity", width = 0.6) +
+  labs(
+    title = "Distribution of Edible vs Poisonous Mushrooms",
+    x = "Mushroom Type",
+    y = "Count"
+  ) +
+  scale_fill_manual(values = c("green", "red")) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 14, face = "bold"),
+    axis.title = element_text(size = 12),
+    panel.grid.minor = element_blank(),
+    legend.position = "none"
+  ) +
+  geom_text(aes(label = Count), vjust = -0.5, size = 4)
 
-plot_unique_frequency <- function(data) {
-  for (col in names(data)) {
-    if (
-      class(data[[col]]) %in% c("character", "factor") 
-      && length(unique(data[[col]])) > 0
-    ) {
-      unique_counts <- as.data.frame(table(data[[col]]))
-      
-      # Plotting bar plot for each attribute
-      p <- ggplot(unique_counts, aes(x = Var1, y = Freq)) +
-        geom_bar(stat = "identity", fill = "skyblue") +
-        labs(
-          title = paste("Frequency of Unique Values for", col),
-          x = col,
-          y = "Frequency"
-        ) +
-        theme_minimal() +
-        theme(axis.text.x = element_text(angle = 90, hjust = 1))
-      
-      print(p)
-    }
-  }
+# Save and display the plot
+ggsave(
+  filename = file.path("images", "class_distribution.png"),
+  plot = p_class,
+  width = 8,
+  height = 6,
+  dpi = 300
+)
+print(p_class)
+
+# Function to create feature distribution plots
+create_feature_plot <- function(data, feature_name) {
+  # Calculate frequencies
+  freq_table <- as.data.frame(table(data[[feature_name]]))
+  names(freq_table) <- c("Category", "Count")
+  
+  # Create plot
+  p <- ggplot(freq_table, aes_string(x = "Category", y = "Count")) +
+    geom_bar(stat = "identity", fill = "skyblue") +
+    labs(
+      title = paste("Distribution of", feature_name),
+      x = feature_name,
+      y = "Frequency"
+    ) +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(size = 12, face = "bold"),
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      axis.title = element_text(size = 10),
+      panel.grid.minor = element_blank()
+    )
+  
+  return(p)
 }
 
-plot_unique_frequency(data)
+# Generate and save feature distribution plots
+feature_plots <- list()
+categorical_cols <- names(data)[sapply(data, function(x) 
+  is.character(x) || is.factor(x))]
 
-# Our data is moderately balanced
+for (col in categorical_cols) {
+  p <- create_feature_plot(data, col)
+  
+  # Save individual plot
+  ggsave(
+    filename = file.path("images", paste0("distribution_", col, ".png")),
+    plot = p,
+    width = 8,
+    height = 5,
+    dpi = 300
+  )
+  
+  feature_plots[[col]] <- p
+}
 
-# Lets us try finding the major habitats of poisonous mushrooms and edible mushrooms
-#-----------------------------------------------------------------------------------
+# Create combined plot
+if (length(feature_plots) > 0) {
+  n_plots <- length(feature_plots)
+  n_cols <- min(3, n_plots)
+  n_rows <- ceiling(n_plots / n_cols)
+  
+  combined_plot <- do.call(gridExtra::grid.arrange,
+    c(feature_plots,
+      ncol = n_cols,
+      nrow = n_rows,
+      top = "Feature Distributions")
+  )
+  
+  # Save combined plot
+  ggsave(
+    filename = file.path("images", "all_distributions.png"),
+    plot = combined_plot,
+    width = 18,
+    height = 4 * n_rows,
+    dpi = 300
+  )
+}
 
-df_grp_region <- data %>%
+#----------------------------------------
+# 3. Feature Analysis
+#----------------------------------------
+
+# Analyze habitat distribution
+habitat_distribution <- data %>%
   group_by(habitat) %>%
   summarise(
-    poisonous_frequency = sum(class == "p"),
-    edible_frequency = sum(class == "e"),
+    poisonous = sum(class == "p"),
+    edible = sum(class == "e"),
     .groups = "drop"
   )
 
-View(df_grp_region)
-print(df_grp_region)
-
-df_grp_region_long <- tidyr::pivot_longer(df_grp_region,
-                                          cols = c(poisonous_frequency, edible_frequency),
-                                          names_to = "Class", values_to = "Frequency"
+# Convert to long format for plotting
+habitat_long <- tidyr::pivot_longer(habitat_distribution,
+  cols = c(poisonous, edible),
+  names_to = "Class",
+  values_to = "Frequency"
 )
 
-df_grp_region_long
-
-
-ggplot(df_grp_region_long, aes(x = habitat, y = Frequency, fill = Class)) +
+# Plot habitat distribution
+p_habitat <- ggplot(habitat_long, aes(x = habitat, y = Frequency, fill = Class)) +
   geom_bar(stat = "identity", position = "dodge") +
-  labs(x = "Habitat", y = "Frequency", fill = "Class") +
-  scale_fill_manual(values = c("green", "red"), labels = c("Edible", "Poisonous")) +
-  ggtitle("Habitat Distribution: Edible Vs Poisonous") +
-  theme_minimal()
+  labs(
+    title = "Habitat Distribution by Mushroom Class",
+    x = "Habitat Type",
+    y = "Frequency",
+    fill = "Class"
+  ) +
+  scale_fill_manual(values = c("green", "red")) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 14, face = "bold"),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    axis.title = element_text(size = 12),
+    panel.grid.minor = element_blank(),
+    legend.position = "right"
+  )
 
+# Save and display the plot
+ggsave(
+  filename = file.path("images", "habitat_distribution.png"),
+  plot = p_habitat,
+  width = 10,
+  height = 6,
+  dpi = 300
+)
+print(p_habitat)
 
-
-
-# With the help of graph we can see that most of the poisonous mushrooms grow across paths
-
-
-
-
-# Lets try finding out the populations these mushrooms usually fall in
-#----------------------------------------------------------------------
-
-
-df_grp_population <- data %>%
+# Analyze population distribution
+population_distribution <- data %>%
   group_by(population) %>%
   summarise(
-    poisonous_frequency = sum(class == "p"),
-    edible_frequency = sum(class == "e"),
+    poisonous = sum(class == "p"),
+    edible = sum(class == "e"),
     .groups = "drop"
   )
 
-View(df_grp_population)
-print(df_grp_population)
-
-df_grp_population_long <- tidyr::pivot_longer(df_grp_population,
-                                              cols = c(poisonous_frequency, edible_frequency),
-                                              names_to = "Class", values_to = "Frequency"
+# Convert to long format for plotting
+population_long <- tidyr::pivot_longer(population_distribution,
+  cols = c(poisonous, edible),
+  names_to = "Class",
+  values_to = "Frequency"
 )
 
-
-ggplot(df_grp_population_long, aes(x = population, y = Frequency, fill = Class)) +
+# Plot population distribution
+p_population <- ggplot(population_long, aes(x = population, y = Frequency, fill = Class)) +
   geom_bar(stat = "identity", position = "dodge") +
-  labs(x = "population", y = "Frequency", fill = "Class") +
-  scale_fill_manual(values = c("green", "red"), labels = c("Edible", "Poisonous")) +
-  ggtitle("Population Distribution: Edible Vs Poisonous") +
-  theme_minimal()
+  labs(
+    title = "Population Distribution by Mushroom Class",
+    x = "Population Type",
+    y = "Frequency",
+    fill = "Class"
+  ) +
+  scale_fill_manual(
+    values = c("green", "red"),
+    labels = c("Edible", "Poisonous")
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 14, face = "bold"),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    axis.title = element_text(size = 12),
+    panel.grid.minor = element_blank(),
+    legend.position = "right"
+  )
 
-string_columns <- names((sapply(data, is.character)))
-for (column in string_columns) {
-  data[[column]] <- as.numeric(factor(data[[column]],
-                                      levels = unique(data[[column]])
-  ))
-}
+# Save and display the plot
+ggsave(
+  filename = file.path("images", "population_distribution.png"),
+  plot = p_population,
+  width = 10,
+  height = 6,
+  dpi = 300
+)
+print(p_population)
 
-# Correlation
-cor_matrix <- cor(data)
-corrplot(cor_matrix)
+# Feature correlation analysis
+data_numeric <- data
+class_col <- data_numeric$class
+data_numeric$class <- NULL
+data_numeric[] <- lapply(data_numeric, function(x) as.numeric(factor(x)))
 
-print(ncol(data))
+# Remove columns with zero variance
+var_cols <- apply(data_numeric, 2, var, na.rm = TRUE)
+data_numeric <- data_numeric[, var_cols > 0]
 
-write.xlsx(
-  as.table(cor_matrix),
-  file = "cor.matrix.xlsx",
-  rowNames = TRUE,
-  colNames = TRUE
+# Calculate correlation matrix with handling for NA values
+cor_matrix <- cor(data_numeric, use = "pairwise.complete.obs")
+
+# Replace any remaining NA/Inf values with 0
+cor_matrix[is.na(cor_matrix)] <- 0
+cor_matrix[!is.finite(cor_matrix)] <- 0
+
+# Create correlation plot
+png(
+  filename = file.path("images", "correlation_matrix.png"),
+  width = 12,
+  height = 10,
+  units = "in",
+  res = 300
+)
+corrplot(
+  cor_matrix,
+  method = "color",
+  type = "upper",
+  order = "hclust",
+  addCoef.col = "black",
+  tl.col = "black",
+  tl.srt = 45,
+  diag = FALSE,
+  title = "Feature Correlation Matrix",
+  mar = c(0,0,2,0)
+)
+dev.off()
+
+# Display correlation plot in R environment
+corrplot(
+  cor_matrix,
+  method = "color",
+  type = "upper",
+  order = "hclust",
+  addCoef.col = "black",
+  tl.col = "black",
+  tl.srt = 45,
+  diag = FALSE,
+  title = "Feature Correlation Matrix"
 )
 
-columns_to_remove <- integer(0)
+data_numeric$class <- class_col
 
-for (i in seq(1, ncol(data))) {
-  print(i)
-  print(abs(cor_matrix[i]))
-  if(!is.na(cor_matrix[i]) && abs(cor_matrix[i]) < .5) {
-    columns_to_remove <- c(columns_to_remove, i)
-  }
-}
+#----------------------------------------
+# 4. Model Building and Training
+#----------------------------------------
 
-data <- data[, -columns_to_remove]
-data <- data[, -which(names(data) == "veil.type")]
+# Data preparation
+data <- read.csv("archive/mushrooms.csv", stringsAsFactors = TRUE)
+data$veil.type <- NULL  # Remove column with single level
+data[] <- lapply(data, factor)
 
-# b) Split the data randomly into 2:1 ratio
-set.seed(123) # Set seed for reproducibility
-train_indices <- createDataPartition(data$class, p = 2/3, list = FALSE)
-train_data <- data[train_indices, ]
-test_data <- data[-train_indices, ]
+# Create train-test split
+set.seed(123)
+trainIndex <- createDataPartition(data$class, p = 0.7, list = FALSE)
+train_data <- data[trainIndex,]
+test_data <- data[-trainIndex,]
 
-# Actual labels of the test class
-actual_labels <- as.factor(test_data$class)
+# Define cross-validation parameters
+ctrl <- trainControl(
+  method = "cv",
+  number = 10,
+  classProbs = TRUE,
+  savePredictions = TRUE,
+  summaryFunction = twoClassSummary
+)
 
-# Function to calculate entropy
-calculate_entropy <- function(labels) {
-  probabilities <- table(labels) / length(labels)
-  -sum(probabilities * log2(probabilities + 1e-10))
-}
+# Define model parameters grid
+j48_grid <- expand.grid(
+  C = c(0.01, 0.1, 0.25),
+  M = c(2, 5, 10)
+)
 
-# Function to calculate information gain
-calculate_information_gain <- function(data, feature, target) {
-  total_entropy <- calculate_entropy(data[[target]])
-  feature_levels <- unique(data[[feature]])
-  
-  # Calculate split entropy
-  split_entropy <- sum(
-    sapply(feature_levels, function(level) {
-      subset_data <- data[data[[feature]] == level, ]
-      weight <- nrow(subset_data) / nrow(data)
-      weight * calculate_entropy(subset_data[[target]])
-    })
-  )
-  
-  # Calculate intrinsic value (IV)
-  iv <- -sum(
-    sapply(feature_levels, function(level) {
-      subset_data <- data[data[[feature]] == level, ]
-      weight <- nrow(subset_data) / nrow(data)
-      weight * log2(weight + 1e-10)
-    })
-  )
-  
-  # Calculate gain ratio
-  gain_ratio <- (total_entropy - split_entropy) / iv
-  
-  gain_ratio
-}
+# Train model with cross-validation
+c4_5_model <- train(
+  class ~ .,
+  data = train_data,
+  method = "J48",
+  trControl = ctrl,
+  tuneGrid = j48_grid,
+  metric = "ROC"
+)
 
-# Function to find the best split
-find_best_split <- function(data, features, target) {
-  information_gains <- sapply(features, function(feature) {
-    calculate_information_gain(data, feature, target)
-  })
-  best_feature <- features[which.max(information_gains)]
-  best_feature
-}
+# Calculate and visualize feature importance
+importance <- information.gain(class ~ ., data = train_data)
+importance <- data.frame(
+  Feature = rownames(importance),
+  Importance = importance$attr_importance
+)
+importance <- importance[order(-importance$Importance), ]
 
-# Function to build the decision tree
-build_decision_tree <- function(data, features, target) {
-  if (length(unique(data[[target]])) == 1) {
-    # If all examples have the same label, create a leaf node
-    return(data[[target]][1])
-  }
-  
-  if (length(features) == 0) {
-    # If there are no features left, create a leaf node with the majority label
-    majority_label <- names(sort(table(data[[target]]), decreasing = TRUE)[1])
-    return(majority_label)
-  }
-  
-  best_feature <- find_best_split(data, features, target)
-  
-  tree <- list()
-  tree$feature <- best_feature
-  tree$children <- list()
-  
-  feature_levels <- unique(data[[best_feature]])
-  for (level in feature_levels) {
-    subset_data <- data[data[[best_feature]] == level, ]
-    subset_data <- subset_data[, !names(subset_data) %in% best_feature]
-    subset_features <- features[features != best_feature]
-    subtree <- build_decision_tree(subset_data, subset_features, target)
-    tree$children[[as.character(level)]] <- subtree
-  }
-  
-  return(tree)
-}
+# Create feature importance plot
+p_importance <- ggplot(head(importance, 10), aes(x = reorder(Feature, Importance), y = Importance)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  coord_flip() +
+  labs(
+    title = "Top 10 Most Important Features",
+    x = "Feature",
+    y = "Information Gain"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 14, face = "bold"),
+    axis.title = element_text(size = 12),
+    panel.grid.minor = element_blank()
+  ) +
+  # Add percentage labels
+  geom_text(aes(label = sprintf("%.1f%%", Importance * 100)), 
+            hjust = -0.1,
+            size = 3.5)
 
-# Example usage
-features <- names(data)[-1]
-target <- names(data)[1]
+# Save feature importance plot
+ggsave(
+  filename = file.path("images", "feature_importance.png"),
+  plot = p_importance,
+  width = 10,
+  height = 6,
+  dpi = 300
+)
 
-# Function to make predictions on the test set
-predict_tree <- function(tree, test_data) {
-  predictions <- apply(test_data, 1, function(row) predict_decision_tree(tree, data.frame(t(row))))
-  return(predictions)
-}
+cat("\n=== TOP 10 MOST IMPORTANT FEATURES ===\n")
+print(head(importance, 10))
 
-# Predict Decision Tree Function
-predict_decision_tree <- function(tree, new_data) {
-  while (!is.character(tree) && !is.null(names(tree))) {
-    feature <- tree$feature
-    feature_value <- as.character(new_data[[feature]])
-    
-    # Convert feature_value to the same format as in the training data
-    feature_value <- as.numeric(factor(feature_value, levels = levels(train_data[[feature]])))
-    
-    if (!feature_value %in% names(tree$children)) {
-      # If feature value is not in the tree, return the majority class
-      majority_class <- names(sort(table(train_data$class), decreasing = TRUE))[1]
-      return(majority_class)
-    }
-    
-    # Access the child node
-    tree <- tree$children[[feature_value]]
-  }
-  
-  return(tree)
-}
+#----------------------------------------
+# 5. Model Evaluation and Analysis
+#----------------------------------------
 
-# Function to calculate confusion matrix
-calculate_confusion_matrix <- function(predictions, actual, positive_class) {
-  conf_matrix <- table(predictions, actual)
-  return(conf_matrix)
-}
+# Make predictions on test set
+test_pred <- predict(c4_5_model, test_data)
+test_pred_prob <- predict(c4_5_model, test_data, type = "prob")
 
-# Function to calculate Precision
-calculate_precision <- function(predictions, actual, positive_class) {
-  true_positive <- sum(predictions == positive_class & actual == positive_class)
-  false_positive <- sum(predictions == positive_class & actual != positive_class)
-  
-  if (true_positive + false_positive == 0) {
-    return(0)
-  }
-  
-  precision <- true_positive / (true_positive + false_positive)
-  return(precision)
-}
+# Print debugging information
+cat("\n=== ROC Curve Debugging Info ===\n")
+cat("Test data class levels:", levels(test_data$class), "\n")
+cat("Probability matrix dimensions:", dim(test_pred_prob), "\n")
+cat("First few probability predictions:\n")
+print(head(test_pred_prob))
 
-# Function to calculate Recall
-calculate_recall <- function(predictions, actual, positive_class) {
-  true_positive <- sum(predictions == positive_class & actual == positive_class)
-  false_negative <- sum(predictions != positive_class & actual == positive_class)
-  
-  if (true_positive + false_negative == 0) {
-    return(0)
-  }
-  
-  recall <- true_positive / (true_positive + false_negative)
-  return(recall)
-}
+# Ensure proper factor levels and convert probabilities to numeric
+test_data$class <- factor(test_data$class, levels = c("e", "p"))
+prob_edible <- as.numeric(test_pred_prob[, "e"])
 
-# Function to calculate F1-score
-calculate_f1_score <- function(predictions, actual, positive_class) {
-  precision <- calculate_precision(predictions, actual, positive_class)
-  recall <- calculate_recall(predictions, actual, positive_class)
-  
-  if (precision + recall == 0) {
-    return(0)
-  }
-  
-  f1_score <- 2 * precision * recall / (precision + recall)
-  return(f1_score)
-}
+# Print more debugging info
+cat("\nProbability summary for edible class:\n")
+print(summary(prob_edible))
 
-# Function to calculate accuracy
-calculate_accuracy <- function(predictions, actual, positive_class) {
-  true_positive <- sum(predictions == positive_class & actual == positive_class)
-  true_negative <- sum(predictions != positive_class & actual != positive_class)
-  false_positive <- sum(predictions == positive_class & actual != positive_class)
-  false_negative <- sum(predictions != positive_class & actual == positive_class)
-  accuracy <- (true_positive + true_negative) / (true_positive + true_negative + false_positive + false_negative)
-  return(accuracy)
-}
+# Calculate ROC curve
+roc_obj <- roc(response = test_data$class,
+               predictor = prob_edible,
+               levels = c("p", "e"),
+               direction = ">",
+               quiet = TRUE)
 
-# Function to calculate ROC curve
-calculate_roc_curve <- function(predictions, actual, positive_class) {
-  thresholds <- seq(0, 1, 0.01)
-  roc_data <- data.frame(TP = numeric(length(thresholds)), FP = numeric(length(thresholds)))
-  
-  for (i in seq_along(thresholds)) {
-    threshold <- thresholds[i]
-    binary_predictions <- as.integer(predictions == positive_class & actual == positive_class)
-    
-    # Handle cases where there are no positive predictions
-    if (sum(binary_predictions) == 0) {
-      roc_data[i, "TP"] <- 0
-      roc_data[i, "FP"] <- 0
-    } else {
-      conf_matrix <- table(binary_predictions, as.integer(actual == positive_class))
-      
-      # Check if the matrix has the required dimensions
-      if (nrow(conf_matrix) >= 2 && ncol(conf_matrix) >= 2) {
-        roc_data[i, "TP"] <- conf_matrix[2, 2] / sum(conf_matrix[2, ])
-        roc_data[i, "FP"] <- conf_matrix[1, 2] / sum(conf_matrix[1, ])
-      } else {
-        roc_data[i, "TP"] <- 0
-        roc_data[i, "FP"] <- 0
-      }
-    }
-  }
-  
-  return(roc_data)
-}
+cat("\nROC object summary:\n")
+print(roc_obj)
 
-# Build the decision tree
-tree <- build_decision_tree(train_data, features, target)
-# Verifying the classifier's performance on test data
-predictions <- predict_tree(tree, test_data)
+auc_value <- auc(roc_obj)
+cat("\nAUC value:", auc_value, "\n")
 
-# Confusion matrix
-conf_matrix <- calculate_confusion_matrix(predictions, actual_labels, positive_class = 2)
-print("Confusion Matrix:")
-print(conf_matrix)
-# Evaluating the model performance based on accuracy, precision, recall, f1-score
-calculate_precision(predictions, test_data$class, positive_class = 2)
-calculate_recall(predictions, test_data$class, positive_class = 2)
-calculate_accuracy(predictions, test_data$class, positive_class = 2)
-calculate_f1_score(predictions, test_data$class, positive_class = 2)
+# Create ROC curve plot with base R first to verify
+pdf(file.path("images", "roc_curve_base.pdf"))
+plot(roc_obj, main = "ROC Curve Check")
+dev.off()
 
-# Function for k-fold cross-validation
-k_fold_cross_validation <- function(data, features, target, k) {
-  set.seed(123) # set seed for reproducibility
-  folds <- sample(1:k, nrow(data), replace = TRUE) # k folds
-  metrics <- data.frame(
-    Precision = numeric(k),
-    Recall = numeric(k),
-    Accuracy = numeric(k),
-    F1_Score = numeric(k)
-  )
-  # Evaluation
-  for (i in 1:k) {
-    train_data <- data[folds != i, ]
-    test_data <- data[folds == i, ]
-    
-    tree <- build_decision_tree(train_data, features, target)
-    
-    predictions <- predict_tree(tree, test_data)
-    
-    metrics[i, "Precision"] <- calculate_precision(predictions, test_data$class, positive_class = 2)
-    metrics[i, "Recall"] <- calculate_recall(predictions, test_data$class, positive_class = 2)
-    metrics[i, "Accuracy"] <- calculate_accuracy(predictions, test_data$class, positive_class = 2)
-    metrics[i, "F1_Score"] <- calculate_f1_score(predictions, test_data$class, positive_class = 2)
-  }
-  
-  return(metrics)
-}
+# Create ggplot2 version
+p_roc <- ggroc(roc_obj, legacy.axes = TRUE) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray50", alpha = 0.7) +
+  labs(
+    title = paste("ROC Curve (AUC =", round(auc_value, 3), ")"),
+    x = "False Positive Rate (1 - Specificity)",
+    y = "True Positive Rate (Sensitivity)"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 14, face = "bold"),
+    axis.title = element_text(size = 12),
+    panel.grid.minor = element_blank(),
+    legend.position = "none"
+  ) +
+  coord_equal()
 
-# ROC Curve
-roc_data <- calculate_roc_curve(predictions, actual_labels, positive_class = "p")
-plot(roc_data$FP, roc_data$TP, type = "l", col = "blue", xlab = "False Positive Rate", ylab = "True Positive Rate", main = "ROC Curve")
-abline(h = 1, v = 0, col = "red", lty = 2)
-
-# k-fold cross validation
-features <- names(data)[-1]
-target <- names(data)[1]
-k_fold_metrics <- k_fold_cross_validation(data, features, target = "class", k = 10)
-
-# Print k-fold cross-validation metrics
-print(k_fold_metrics)
+# Save ROC curve plot
+ggsave(
+  filename = file.path("images", "roc_curve.png"),
+  plot = p_roc,
+  width = 8,
+  height = 8,
+  dpi = 300
+)

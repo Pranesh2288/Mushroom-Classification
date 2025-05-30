@@ -6,3 +6,5 @@
 
 *.RData
 *.RHistory
+pdf
+.gitignore
