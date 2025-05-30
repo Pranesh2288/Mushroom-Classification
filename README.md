@@ -91,7 +91,6 @@ Most significant predictive features:
 ### Model Performance
 
 - Accuracy: 100% on test set
-- ROC AUC: 0.9994
 - Sensitivity (True Positive Rate): 100%
 - Specificity (True Negative Rate): 100%
 - Cross-validation accuracy: 99.90% ± 0.14%

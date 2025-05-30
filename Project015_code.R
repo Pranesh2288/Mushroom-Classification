@@ -5,6 +5,9 @@ utils::globalVariables(c(
   "Category", "Count", "Feature", "Importance"
 ))
 
+# Suppress automatic PDF creation
+pdf(NULL)
+
 # Import required libraries
 library(openxlsx)
 library(caret)
@@ -120,7 +123,7 @@ create_feature_plot <- function(data, feature_name) {
   names(freq_table) <- c("Category", "Count")
   
   # Create plot
-  p <- ggplot(freq_table, aes_string(x = "Category", y = "Count")) +
+  p <- ggplot(freq_table, aes(x = .data$Category, y = .data$Count)) +
     geom_bar(stat = "identity", fill = "skyblue") +
     labs(
       title = paste("Distribution of", feature_name),
@@ -139,44 +142,17 @@ create_feature_plot <- function(data, feature_name) {
 }
 
 # Generate and save feature distribution plots
-feature_plots <- list()
 categorical_cols <- names(data)[sapply(data, function(x) 
   is.character(x) || is.factor(x))]
 
+# Save individual PNG files for each feature
 for (col in categorical_cols) {
   p <- create_feature_plot(data, col)
-  
-  # Save individual plot
   ggsave(
     filename = file.path("images", paste0("distribution_", col, ".png")),
     plot = p,
-    width = 8,
-    height = 5,
-    dpi = 300
-  )
-  
-  feature_plots[[col]] <- p
-}
-
-# Create combined plot
-if (length(feature_plots) > 0) {
-  n_plots <- length(feature_plots)
-  n_cols <- min(3, n_plots)
-  n_rows <- ceiling(n_plots / n_cols)
-  
-  combined_plot <- do.call(gridExtra::grid.arrange,
-    c(feature_plots,
-      ncol = n_cols,
-      nrow = n_rows,
-      top = "Feature Distributions")
-  )
-  
-  # Save combined plot
-  ggsave(
-    filename = file.path("images", "all_distributions.png"),
-    plot = combined_plot,
-    width = 18,
-    height = 4 * n_rows,
+    width = 10,
+    height = 7,
     dpi = 300
   )
 }
@@ -295,7 +271,23 @@ cor_matrix <- cor(data_numeric, use = "pairwise.complete.obs")
 cor_matrix[is.na(cor_matrix)] <- 0
 cor_matrix[!is.finite(cor_matrix)] <- 0
 
-# Create correlation plot
+# Create and save correlation plot
+p_correlation <- corrplot(
+  cor_matrix,
+  method = "color",
+  type = "upper",
+  order = "hclust",
+  addCoef.col = NULL,  # Remove number overlay
+  tl.col = "black",
+  tl.srt = 45,
+  diag = FALSE,
+  title = "Feature Correlation Matrix",
+  cl.ratio = 0.2,      # Increase colorbar width
+  cl.align = "r",      # Align colorbar to the right
+  tl.cex = 0.7        # Adjust text size for better readability
+)
+
+# Save correlation plot
 png(
   filename = file.path("images", "correlation_matrix.png"),
   width = 12,
@@ -303,32 +295,8 @@ png(
   units = "in",
   res = 300
 )
-corrplot(
-  cor_matrix,
-  method = "color",
-  type = "upper",
-  order = "hclust",
-  addCoef.col = "black",
-  tl.col = "black",
-  tl.srt = 45,
-  diag = FALSE,
-  title = "Feature Correlation Matrix",
-  mar = c(0,0,2,0)
-)
+p_correlation
 dev.off()
-
-# Display correlation plot in R environment
-corrplot(
-  cor_matrix,
-  method = "color",
-  type = "upper",
-  order = "hclust",
-  addCoef.col = "black",
-  tl.col = "black",
-  tl.srt = 45,
-  diag = FALSE,
-  title = "Feature Correlation Matrix"
-)
 
 data_numeric$class <- class_col
 
@@ -362,15 +330,38 @@ j48_grid <- expand.grid(
   M = c(2, 5, 10)
 )
 
-# Train model with cross-validation
-c4_5_model <- train(
-  class ~ .,
-  data = train_data,
-  method = "J48",
-  trControl = ctrl,
-  tuneGrid = j48_grid,
-  metric = "ROC"
-)
+# Check if model already exists
+model_dir <- "models"
+model_path <- file.path(model_dir, "c4_5_model.rds")
+dir.create(model_dir, showWarnings = FALSE)
+
+if (file.exists(model_path)) {
+  cat("\n=== LOADING EXISTING MODEL ===\n")
+  c4_5_model <- readRDS(model_path)
+  cat("Model loaded from:", model_path, "\n")
+  cat("Model class:", class(c4_5_model), "\n")
+} else {
+  cat("\n=== TRAINING NEW MODEL ===\n")
+  # Train model with cross-validation
+  c4_5_model <- train(
+    class ~ .,
+    data = train_data,
+    method = "J48",
+    trControl = ctrl,
+    tuneGrid = j48_grid,
+    metric = "ROC"
+  )
+  
+  # Save the trained model
+  saveRDS(c4_5_model, file = model_path)
+  cat("Model saved to:", model_path, "\n")
+  
+  # Verify model can be loaded
+  loaded_model <- readRDS(model_path)
+  cat("\n=== MODEL SAVING VERIFICATION ===\n")
+  cat("Model successfully saved and loaded from disk\n")
+  cat("Model class:", class(loaded_model), "\n")
+}
 
 # Calculate and visualize feature importance
 importance <- information.gain(class ~ ., data = train_data)
@@ -411,70 +402,3 @@ ggsave(
 
 cat("\n=== TOP 10 MOST IMPORTANT FEATURES ===\n")
 print(head(importance, 10))
-
-#----------------------------------------
-# 5. Model Evaluation and Analysis
-#----------------------------------------
-
-# Make predictions on test set
-test_pred <- predict(c4_5_model, test_data)
-test_pred_prob <- predict(c4_5_model, test_data, type = "prob")
-
-# Print debugging information
-cat("\n=== ROC Curve Debugging Info ===\n")
-cat("Test data class levels:", levels(test_data$class), "\n")
-cat("Probability matrix dimensions:", dim(test_pred_prob), "\n")
-cat("First few probability predictions:\n")
-print(head(test_pred_prob))
-
-# Ensure proper factor levels and convert probabilities to numeric
-test_data$class <- factor(test_data$class, levels = c("e", "p"))
-prob_edible <- as.numeric(test_pred_prob[, "e"])
-
-# Print more debugging info
-cat("\nProbability summary for edible class:\n")
-print(summary(prob_edible))
-
-# Calculate ROC curve
-roc_obj <- roc(response = test_data$class,
-               predictor = prob_edible,
-               levels = c("p", "e"),
-               direction = ">",
-               quiet = TRUE)
-
-cat("\nROC object summary:\n")
-print(roc_obj)
-
-auc_value <- auc(roc_obj)
-cat("\nAUC value:", auc_value, "\n")
-
-# Create ROC curve plot with base R first to verify
-pdf(file.path("images", "roc_curve_base.pdf"))
-plot(roc_obj, main = "ROC Curve Check")
-dev.off()
-
-# Create ggplot2 version
-p_roc <- ggroc(roc_obj, legacy.axes = TRUE) +
-  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray50", alpha = 0.7) +
-  labs(
-    title = paste("ROC Curve (AUC =", round(auc_value, 3), ")"),
-    x = "False Positive Rate (1 - Specificity)",
-    y = "True Positive Rate (Sensitivity)"
-  ) +
-  theme_minimal() +
-  theme(
-    plot.title = element_text(size = 14, face = "bold"),
-    axis.title = element_text(size = 12),
-    panel.grid.minor = element_blank(),
-    legend.position = "none"
-  ) +
-  coord_equal()
-
-# Save ROC curve plot
-ggsave(
-  filename = file.path("images", "roc_curve.png"),
-  plot = p_roc,
-  width = 8,
-  height = 8,
-  dpi = 300
-)
